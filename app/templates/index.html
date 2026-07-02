@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>日乗</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body {
+      font-family: -apple-system, "Segoe UI", "Hiragino Kaku Gothic ProN",
+                   "Noto Sans JP", Meiryo, sans-serif;
+      max-width: 680px;
+      margin: 2.5rem auto;
+      padding: 0 1rem;
+      line-height: 1.7;
+    }
+    h1 { font-size: 1.1rem; font-weight: 600; letter-spacing: 0.1em; margin: 0 0 0.4rem; opacity: 0.7; }
+    .nav { font-size: 0.8rem; opacity: 0.55; margin-bottom: 1.6rem; }
+    .nav a { color: inherit; }
+    form.compose { margin-bottom: 2.2rem; }
+    textarea {
+      width: 100%;
+      box-sizing: border-box;
+      min-height: 5.5rem;
+      padding: 0.7rem 0.8rem;
+      font: inherit;
+      border: 1px solid rgba(128,128,128,0.4);
+      border-radius: 6px;
+      resize: vertical;
+    }
+    .compose button {
+      margin-top: 0.6rem;
+      padding: 0.45rem 1.4rem;
+      font: inherit;
+      cursor: pointer;
+      border: 1px solid rgba(128,128,128,0.5);
+      border-radius: 6px;
+      background: transparent;
+    }
+    ul.entries { list-style: none; padding: 0; margin: 0; }
+    li.entry {
+      padding: 0.9rem 0;
+      border-top: 1px solid rgba(128,128,128,0.25);
+    }
+    .meta { font-size: 0.8rem; opacity: 0.55; display: flex; justify-content: space-between; align-items: center; }
+    .body { white-space: pre-wrap; word-break: break-word; margin-top: 0.25rem; }
+    .delete button {
+      font-size: 0.75rem;
+      background: none;
+      border: none;
+      cursor: pointer;
+      opacity: 0.5;
+      padding: 0;
+    }
+    .delete button:hover { opacity: 1; }
+    .empty { opacity: 0.5; font-size: 0.9rem; }
+  </style>
+</head>
+<body>
+  <h1>日乗</h1>
+  <div class="nav"><a href="/observations">観察 →</a></div>
+
+  <form class="compose" action="/entries" method="post">
+    <textarea name="body" autofocus placeholder="きょうのこと"></textarea>
+    <div><button type="submit">記す</button></div>
+  </form>
+
+  {% if entries %}
+  <ul class="entries">
+    {% for entry in entries %}
+    <li class="entry">
+      <div class="meta">
+        <span>{{ entry.created_at | local }}</span>
+        <form class="delete" action="/entries/{{ entry.id }}/delete" method="post"
+              onsubmit="return confirm('この記録を削除します。よろしいですか？');">
+          <button type="submit">削除</button>
+        </form>
+      </div>
+      <div class="body">{{ entry.body }}</div>
+    </li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  <p class="empty">まだ何も記されていません。</p>
+  {% endif %}
+</body>
+</html>

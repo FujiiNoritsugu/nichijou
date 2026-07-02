@@ -1,0 +1,13 @@
+[project]
+name = "nichijou"
+version = "0.1.0"
+description = "日乗 — 飾らない日々の記録を、開いてすぐ短く書くための個人用記録アプリ（MVP）"
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
+    "jinja2>=3.1",
+    "python-multipart>=0.0.9",
+    "anthropic>=0.40",
+    "pillow>=10.0",
+]

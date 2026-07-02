@@ -1,0 +1,29 @@
+# --- データベース（記録の実体。絶対にコミットしない） ---
+nichijou.db
+nichijou.db-journal
+nichijou.db-wal
+nichijou.db-shm
+*.db
+
+# --- 観察写真（個人情報＝位置情報付きの可能性。絶対にコミットしない） ---
+photos/
+
+# --- API キー等の秘密（EnvironmentFile。絶対にコミットしない） ---
+secrets/
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# --- uv ---
+.uv/
+
+# --- エディタ・OS ---
+.vscode/
+.idea/
+.DS_Store
+
+# 起動ログ
+logs/

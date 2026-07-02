@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>観察 — 日乗</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body {
+      font-family: -apple-system, "Segoe UI", "Hiragino Kaku Gothic ProN",
+                   "Noto Sans JP", Meiryo, sans-serif;
+      max-width: 680px;
+      margin: 2.5rem auto;
+      padding: 0 1rem;
+      line-height: 1.7;
+    }
+    h1 { font-size: 1.1rem; font-weight: 600; letter-spacing: 0.1em; margin: 0 0 0.4rem; opacity: 0.7; }
+    .nav { font-size: 0.8rem; opacity: 0.55; margin-bottom: 1.6rem; }
+    .nav a { color: inherit; }
+    form.compose { margin-bottom: 2.2rem; }
+    .compose input[type="file"] { font: inherit; }
+    .compose button {
+      margin-top: 0.6rem;
+      padding: 0.45rem 1.4rem;
+      font: inherit;
+      cursor: pointer;
+      border: 1px solid rgba(128,128,128,0.5);
+      border-radius: 6px;
+      background: transparent;
+    }
+    ul.observations { list-style: none; padding: 0; margin: 0; }
+    li.observation {
+      padding: 1.1rem 0;
+      border-top: 1px solid rgba(128,128,128,0.25);
+      display: flex;
+      gap: 0.9rem;
+    }
+    .observation img {
+      width: 96px;
+      height: 96px;
+      object-fit: cover;
+      border-radius: 6px;
+      flex-shrink: 0;
+      background: rgba(128,128,128,0.12);
+    }
+    .detail { flex: 1; min-width: 0; }
+    .meta { font-size: 0.8rem; opacity: 0.55; display: flex; justify-content: space-between; align-items: center; gap: 0.6rem; }
+    .species { font-weight: 600; margin-top: 0.15rem; word-break: break-word; }
+    .confidence { font-size: 0.78rem; opacity: 0.65; }
+    .comment { margin-top: 0.2rem; word-break: break-word; }
+    .failed { opacity: 0.6; }
+    .actions { display: flex; gap: 0.8rem; }
+    .actions button {
+      font-size: 0.75rem;
+      background: none;
+      border: none;
+      cursor: pointer;
+      opacity: 0.55;
+      padding: 0;
+      color: inherit;
+    }
+    .actions button:hover { opacity: 1; }
+    .empty { opacity: 0.5; font-size: 0.9rem; }
+  </style>
+</head>
+<body>
+  <h1>観察</h1>
+  <div class="nav"><a href="/">← 日乗</a></div>
+
+  <form class="compose" action="/observations" method="post" enctype="multipart/form-data">
+    <div><input type="file" name="photos" accept="image/jpeg,image/png" multiple required></div>
+    <div><button type="submit">取り込む</button></div>
+  </form>
+
+  {% if observations %}
+  <ul class="observations">
+    {% for obs in observations %}
+    <li class="observation">
+      <a href="/photos/{{ obs.filename }}" target="_blank">
+        <img src="/photos/{{ obs.filename }}" alt="観察写真" loading="lazy">
+      </a>
+      <div class="detail">
+        <div class="meta">
+          <span>{{ obs.taken_at | local }}</span>
+          <span class="actions">
+            <form action="/observations/{{ obs.id }}/reclassify" method="post">
+              <button type="submit">再判定</button>
+            </form>
+            <form action="/observations/{{ obs.id }}/delete" method="post"
+                  onsubmit="return confirm('この観察を削除します。よろしいですか？');">
+              <button type="submit">削除</button>
+            </form>
+          </span>
+        </div>
+        {% if obs.status == 'done' %}
+        <div class="species">{{ obs.species }}<span class="confidence"> ・ 確信度 {{ obs.confidence }}</span></div>
+        <div class="comment">{{ obs.comment }}</div>
+        {% else %}
+        <div class="species failed">判定失敗</div>
+        <div class="comment failed">「再判定」でもう一度 AI に問い合わせられます。</div>
+        {% endif %}
+      </div>
+    </li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  <p class="empty">まだ何も観察されていません。</p>
+  {% endif %}
+</body>
+</html>
