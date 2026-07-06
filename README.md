@@ -90,6 +90,91 @@ Windows ログイン時に WSL を起こしたい場合は、`windows/nichijou-a
 ./stop.sh    # start.sh で起動した分を停止
 ```
 
+## スマホから写真を投函する（投函口）
+
+散歩で撮った写真を、帰宅後に家の Wi-Fi から**スマホのブラウザで直接投函**するための専用ルート。取り込み処理（保存→EXIF→AI判定→DB）は観察と同一。
+
+**守っている線（設計の核）**
+- 母屋（日乗 `/`・観察 `/observations`・写真閲覧 `/photos/*`）は**これまで通り `127.0.0.1` からのみ**アクセス可能。LAN から触ると **403**。アプリのミドルウェアがソケットの実接続元 IP だけで判定する（`X-Forwarded-For` 等の転送ヘッダは信用しない）。
+- LAN に露出するのは**投函口 `/u/<token>` だけ**。投函口は「入れる」専用で、一覧・閲覧は一切持たない。
+- WSL2 は NAT 配下のため、LAN → Windows → WSL と転送された接続の送信元は必ず `172.x`（gateway 等）になり、`127.0.0.1` にはならない。この性質がループバック判定の安全性を担保する（→ `.wslconfig` を `networkingMode=mirrored` に変えるとこの前提は崩れる。NAT モードのまま運用すること）。
+
+### 1. 投函トークンを作る
+
+`secrets/`（gitignore・700）に 64 文字の hex を置く。これが URL の `<token>` になる。
+
+```bash
+python -c "import secrets; print(secrets.token_hex(32))" > secrets/upload.token
+chmod 600 secrets/upload.token
+```
+
+トークンが無い／空のときは投函口は**全て 404**（＝トークンを置かない限り投函口は存在しない）。値を変えたいときはこのファイルを書き換えてサービスを再起動する。トークンは URL に含まれるが、アクセスログには `/u/<redacted>` と伏字化して記録される（生の値はログに残らない）。
+
+### 2. LAN へ公開する（バインドは 0.0.0.0 済み）
+
+`install-autostart.sh` が生成する systemd ユニットは `--host 0.0.0.0` で待ち受ける（母屋はミドルウェアが 403 で守る）。変更を反映するには再実行:
+
+```bash
+sudo ./install-autostart.sh
+```
+
+> `start.sh`（systemd 不調時の手起動フォールバック）は意図的に `127.0.0.1` のまま。投函口の LAN 公開は systemd 経路でのみ有効。
+
+### 3. Windows 側の転送設定（WSL2 は NAT 配下のため必要）
+
+`windows/nichijou-portproxy.ps1` が、現在の WSL の IP へ `:8000` を転送し直し、ファイアウォール（プライベートのみ TCP 8000 許可）を冪等に確保する。**WSL の IP は再起動ごとに変わる**ため、これを**ログオンのたびに昇格実行**する。
+
+**(a) スクリプトを Windows 側へコピー**（`\\wsl$` 直参照はログオン初期に不安定なため、ローカルに置く）:
+
+```powershell
+# 通常の PowerShell（<Distro> は `wsl -l -q` で確認）
+Copy-Item "\\wsl$\<Distro>\home\fujii\nichijou\windows\nichijou-portproxy.ps1" `
+          "$env:USERPROFILE\nichijou-portproxy.ps1"
+```
+
+**(b) タスクスケジューラに「ログオン時・最上位の特権」で登録**（管理者 PowerShell、一度だけ。portproxy/FW は管理者権限が必須）:
+
+```powershell
+$ps1 = "$env:USERPROFILE\nichijou-portproxy.ps1"
+$action  = New-ScheduledTaskAction -Execute "powershell.exe" `
+  -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$ps1`""
+$trigger = New-ScheduledTaskTrigger -AtLogOn
+$principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" `
+  -LogonType Interactive -RunLevel Highest
+Register-ScheduledTask -TaskName "nichijou portproxy" -Action $action `
+  -Trigger $trigger -Principal $principal -Force
+```
+
+これで Windows ログオンのたびに WSL 起動＋portproxy 張り直し＋FW 確保が昇格実行される。**旧 `windows/nichijou-autostart.vbs`（WSL を起こすだけ）の役割は本スクリプトが内包する**ため、スタートアップに置いていた場合は外してよい。
+
+**(c) 動作確認（初回は手動で一度実行）**:
+
+```powershell
+# 管理者 PowerShell
+& "$env:USERPROFILE\nichijou-portproxy.ps1"
+netsh interface portproxy show v4tov4   # 0.0.0.0:8000 -> <WSLのIP>:8000 を確認
+```
+
+### 4. スマホから開く
+
+**PC の LAN 内 IP を確認**（Wi-Fi アダプタの `192.168.x.x` 等）:
+
+```powershell
+Get-NetIPAddress -AddressFamily IPv4 |
+  Where-Object {$_.PrefixOrigin -eq "Dhcp"} |
+  Select-Object IPAddress, InterfaceAlias
+```
+
+スマホ（PC と同じ Wi-Fi）のブラウザで次を開く:
+
+```
+http://<PCのLAN内IP>:8000/u/<token>
+```
+
+写真を選んで「投函する」を押すと、観察へ取り込まれ「n 枚受け付けました（完了/失敗/対象外）」が表示される。カメラロールから複数選択可（`accept="image/*"`、受理は jpg/png のみ）。1 回の上限は 20 枚・合計 64 MiB。
+
+**ホーム画面に追加**（Android Chrome）: 上記 URL を開く → ⋮ メニュー →「ホーム画面に追加」。タイトルは「写真投函」。以後アイコンから一発で開ける。
+
 ## 構成
 
 ```
@@ -99,20 +184,24 @@ nichijou/
 ├── .gitignore                  # *.db / photos/ / secrets/ / logs/ を除外
 ├── README.md
 ├── LICENSE
-├── install-autostart.sh        # 自動起動セットアップ（sudo で1回実行）
-├── start.sh / stop.sh          # 手動起動フォールバック
+├── install-autostart.sh        # 自動起動セットアップ（sudo で1回実行。--host 0.0.0.0）
+├── start.sh / stop.sh          # 手動起動フォールバック（127.0.0.1 のまま）
 ├── windows/
-│   └── nichijou-autostart.vbs  # Windowsログイン時にWSLを起こすトリガ
-├── secrets/                    # APIキー等（gitignore・非公開）
+│   ├── nichijou-autostart.vbs   # （旧）Windowsログイン時にWSLを起こすトリガ
+│   └── nichijou-portproxy.ps1   # ログオン時に portproxy を現WSL-IPへ張り直す（要・昇格）
+├── secrets/                    # APIキー・投函トークン（gitignore・非公開）
+│   ├── anthropic.env            #   ANTHROPIC_API_KEY
+│   └── upload.token             #   投函口トークン（64 hex）
 ├── photos/                     # 観察写真の実体（gitignore・非公開）
 ├── nichijou.db                 # 日乗＋観察のメタデータ（gitignore・非公開）
 └── app/
-    ├── main.py                 # ルーティング（日乗 / 観察）
+    ├── main.py                 # ルーティング（日乗 / 観察 / 投函口）＋ ループバック制限ミドルウェア
     ├── db.py                   # 保存層（ここだけが SQLite を知る）
     ├── vision.py               # 写真の種類判定（Anthropic vision）
     └── templates/
         ├── index.html          # 日乗（入力＋一覧）
-        └── observations.html   # 観察（写真アップロード＋判定一覧）
+        ├── observations.html   # 観察（写真アップロード＋判定一覧）
+        └── upload.html         # 投函口（スマホ向け・投函専用。一覧なし）
 ```
 
 ## ライセンス

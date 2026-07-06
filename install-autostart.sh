@@ -34,7 +34,9 @@ Environment=HOME=${RUN_HOME}
 # ファイルが無くても起動できるよう先頭に "-" を付ける。実キーはこのユニットに書かない。
 EnvironmentFile=-${PROJECT_DIR}/secrets/anthropic.env
 # 常用起動: --reload は付けない。venv の uvicorn を直接起動。
-ExecStart=${PROJECT_DIR}/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000
+# 0.0.0.0 で待ち受けるが、母屋（日乗・観察・写真閲覧）はアプリのミドルウェアが
+# 127.0.0.1 以外を 403 で弾く。LAN に露出するのは投函口 /u/<token> のみ。
+ExecStart=${PROJECT_DIR}/.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000
 # 異常終了時のみ自動再起動
 Restart=on-failure
 RestartSec=2
