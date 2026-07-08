@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
 import secrets as _secrets
 from datetime import datetime, timezone
@@ -31,9 +32,17 @@ _UPLOAD_TOKEN_PATH = Path(__file__).resolve().parent.parent / "secrets" / "uploa
 _UPLOAD_MAX_FILES = 20
 _UPLOAD_MAX_TOTAL_BYTES = 64 * 1024 * 1024  # 64 MiB
 
-# 母屋（日乗・観察・写真閲覧）へアクセスを許すのはループバックのみ。
-# 0.0.0.0 バインドでは実際には 127.0.0.1 だけが該当する（::1 は保険）。
-_LOOPBACK_HOSTS = {"127.0.0.1", "::1"}
+# このインスタンスが「LAN 公開の投函口専用」かどうか（環境変数で切り替える）。
+#
+# セキュリティ境界は「どのポートを LAN に転送するか」で引く（送信元 IP 判定はしない）。
+# WSL2 は NAT 配下なので、Windows が portproxy で転送したポートだけが LAN から届く。
+# 理由: Windows ホスト経由の接続（localhost 転送）も LAN のスマホ（portproxy）も、
+# WSL アプリから見た送信元は同じゲートウェイ IP になり、両者を区別できないため。
+#
+#   - 日乗インスタンス:  127.0.0.1 にバインドし LAN へ転送しない → PC 専用（NAT が隔離）
+#   - 投函口インスタンス: 0.0.0.0 にバインドし該当ポートだけ転送。NICHIJOU_LAN_ONLY=1 を
+#                         付け、/u/ 以外は 404（母屋はこのインスタンスに存在しない）
+_LAN_ONLY = os.environ.get("NICHIJOU_LAN_ONLY") == "1"
 
 
 def _load_upload_token() -> str | None:
@@ -79,19 +88,15 @@ app = FastAPI(title="日乗 nichijou")
 
 
 @app.middleware("http")
-async def _restrict_to_loopback(request: Request, call_next):
-    """母屋（/ , /entries* , /observations* , /photos/*）は 127.0.0.1 からのみ。
-    投函口（/u/ 配下）だけは非ループバックでも通す（token 照合は各ハンドラが行う）。
+async def _drop_box_only(request: Request, call_next):
+    """LAN 公開の投函口インスタンス（NICHIJOU_LAN_ONLY=1）では、投函口 /u/ 以外の
+    全ルート（/ , /entries* , /observations* , /photos/*）を 404 で塞ぐ。母屋は
+    このインスタンスには存在しないものとして扱い、日記の存在自体を晒さない。
 
-    判定は必ずソケットの実ピア request.client.host のみを見る。X-Forwarded-For
-    等の転送ヘッダは一切信用しない（netsh portproxy は生 TCP 転送で XFF を付けない
-    し、付いていても無視する）。WSL2 は NAT 配下のため LAN 由来の接続は必ず 172.x
-    などになり、127.0.0.1 になることはない。"""
-    if not request.url.path.startswith("/u/"):
-        client = request.client.host if request.client else None
-        if client not in _LOOPBACK_HOSTS:
-            # fail-closed: client が取れない異常時もここで弾く。
-            return PlainTextResponse("forbidden", status_code=403)
+    日乗インスタンス（127.0.0.1 バインド・LAN 非公開）では制限しない。PC 専用で
+    ある保証はバインド先と「LAN へ転送しないこと」で担保する（NAT による隔離）。"""
+    if _LAN_ONLY and not request.url.path.startswith("/u/"):
+        return PlainTextResponse("not found", status_code=404)
     return await call_next(request)
 
 templates = Jinja2Templates(directory=str(Path(__file__).resolve().parent / "templates"))

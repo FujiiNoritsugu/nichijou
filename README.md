@@ -95,9 +95,19 @@ Windows ログイン時に WSL を起こしたい場合は、`windows/nichijou-a
 散歩で撮った写真を、帰宅後に家の Wi-Fi から**スマホのブラウザで直接投函**するための専用ルート。取り込み処理（保存→EXIF→AI判定→DB）は観察と同一。
 
 **守っている線（設計の核）**
-- 母屋（日乗 `/`・観察 `/observations`・写真閲覧 `/photos/*`）は**これまで通り `127.0.0.1` からのみ**アクセス可能。LAN から触ると **403**。アプリのミドルウェアがソケットの実接続元 IP だけで判定する（`X-Forwarded-For` 等の転送ヘッダは信用しない）。
-- LAN に露出するのは**投函口 `/u/<token>` だけ**。投函口は「入れる」専用で、一覧・閲覧は一切持たない。
-- WSL2 は NAT 配下のため、LAN → Windows → WSL と転送された接続の送信元は必ず `172.x`（gateway 等）になり、`127.0.0.1` にはならない。この性質がループバック判定の安全性を担保する（→ `.wslconfig` を `networkingMode=mirrored` に変えるとこの前提は崩れる。NAT モードのまま運用すること）。
+
+境界は「**どのポートを LAN に転送するか**」で引く。**送信元 IP では判定しない**（後述の理由により WSL2 では PC からの接続と LAN からの接続を送信元 IP で区別できないため）。日記と投函口を**別々の systemd サービス／別ポート**として動かす。
+
+| | バインド | LAN 公開 | 中身 |
+|---|---|---|---|
+| **日記** `nichijou.service` | `127.0.0.1:8000` | しない | 全機能（日乗・観察・写真閲覧） |
+| **投函口** `nichijou-dropbox.service` | `0.0.0.0:8001` | portproxy で 8001 だけ転送 | `/u/<token>` のみ。他は 404 |
+
+- **日記は `127.0.0.1` バインド**なので LAN からは到達不能（WSL2 は NAT 配下で、転送していないポートは LAN に見えない）。Windows のブラウザからは従来どおり `localhost:8000` で開ける（WSL の localhost 転送）。
+- **投函口インスタンスは `NICHIJOU_LAN_ONLY=1`** で起動し、`/u/` 以外の全ルートを **404** にする（母屋はこのインスタンスに存在しないものとして扱い、日記の存在自体を晒さない）。LAN に転送するのはこの 8001 だけ。
+- トークンは URL に含まれるが、アクセスログには `/u/<redacted>` と伏字化される（生の値はログに残らない）。
+
+> **なぜ送信元 IP 判定にしないのか**: WSL2 は NAT 配下のため、Windows ホスト経由の接続（`localhost` 転送）も LAN のスマホ（portproxy 経由）も、WSL アプリから見ると送信元が**同じゲートウェイ IP**（例 `172.x.0.1`）になる。両者を送信元で区別できないので、「日記は PC だけ・投函口だけ LAN」をポート／バインドの分離で担保する。この方式は `.wslconfig` のネットワークモードにも依存しない。
 
 ### 1. 投函トークンを作る
 
@@ -108,21 +118,26 @@ python -c "import secrets; print(secrets.token_hex(32))" > secrets/upload.token
 chmod 600 secrets/upload.token
 ```
 
-トークンが無い／空のときは投函口は**全て 404**（＝トークンを置かない限り投函口は存在しない）。値を変えたいときはこのファイルを書き換えてサービスを再起動する。トークンは URL に含まれるが、アクセスログには `/u/<redacted>` と伏字化して記録される（生の値はログに残らない）。
+トークンが無い／空のときは投函口は**全て 404**（＝トークンを置かない限り投函口は存在しない）。値を変えたいときはこのファイルを書き換えて `sudo systemctl restart nichijou-dropbox` する。
 
-### 2. LAN へ公開する（バインドは 0.0.0.0 済み）
+### 2. 二つのサービスを立てる
 
-`install-autostart.sh` が生成する systemd ユニットは `--host 0.0.0.0` で待ち受ける（母屋はミドルウェアが 403 で守る）。変更を反映するには再実行:
+`install-autostart.sh` が日記（127.0.0.1:8000）と投函口（0.0.0.0:8001）の二つの systemd サービスを生成・起動する。再実行で反映:
 
 ```bash
 sudo ./install-autostart.sh
+systemctl status nichijou nichijou-dropbox   # 両方 active か確認
 ```
 
-> `start.sh`（systemd 不調時の手起動フォールバック）は意図的に `127.0.0.1` のまま。投函口の LAN 公開は systemd 経路でのみ有効。
+> `start.sh`（手起動フォールバック）は日記のみ・`127.0.0.1` のまま。投函口は systemd 経路（`nichijou-dropbox.service`）でのみ有効。
 
 ### 3. Windows 側の転送設定（WSL2 は NAT 配下のため必要）
 
-`windows/nichijou-portproxy.ps1` が、現在の WSL の IP へ `:8000` を転送し直し、ファイアウォール（プライベートのみ TCP 8000 許可）を冪等に確保する。**WSL の IP は再起動ごとに変わる**ため、これを**ログオンのたびに昇格実行**する。
+`windows/nichijou-portproxy.ps1` が、現在の WSL の IP へ **`:8001`（投函口）だけ**を転送し直し、ファイアウォール（**信頼ネットワーク＝ Domain + Private のみ**許可。Public は不許可）を冪等に確保する。**WSL の IP は再起動ごとに変わる**ため、これを**ログオンのたびに昇格実行**する。
+
+> **8000 は転送しないこと。** 日記の 8000 を portproxy すると Windows 自身の `localhost:8000` まで奪ってしまい、日記が開けなくなる（スクリプトは古い 8000 転送があれば自動削除する）。
+
+> ネットワーク分類について: 家の Wi-Fi が Windows 上で「ドメイン認証済み（DomainAuthenticated）」と判定される環境では、分類を Private に手動変更できない（グループポリシーでロックされる）。この場合はドメイン プロファイルのファイアウォール規則が使われるため、本スクリプトは **Domain と Private の両方**を許可する（喫茶店等の Public は許可しない＝露出しない）。
 
 **(a) スクリプトを Windows 側へコピー**（`\\wsl$` 直参照はログオン初期に不安定なため、ローカルに置く）:
 
@@ -151,9 +166,16 @@ Register-ScheduledTask -TaskName "nichijou portproxy" -Action $action `
 
 ```powershell
 # 管理者 PowerShell
-& "$env:USERPROFILE\nichijou-portproxy.ps1"
-netsh interface portproxy show v4tov4   # 0.0.0.0:8000 -> <WSLのIP>:8000 を確認
+# 直接 & で呼ぶとマシンの実行ポリシー（Restricted 等）で弾かれるため、
+# タスク登録時と同じく -ExecutionPolicy Bypass 付きで呼ぶ（ポリシー自体は変えない）。
+powershell -NoProfile -ExecutionPolicy Bypass -File "$env:USERPROFILE\nichijou-portproxy.ps1"
+netsh interface portproxy show v4tov4   # 0.0.0.0:8001 -> <WSLのIP>:8001 を確認
 ```
+
+> 実行ポリシーの意味: 既定の `Restricted` は `.ps1` ファイルの実行を禁じる。上のように
+> `-ExecutionPolicy Bypass` を**そのプロセスにだけ**渡せば、システム設定を変えずに実行できる
+> （タスクスケジューラの登録コマンドも同じ方式なので、ログオン時の自動実行はこのままで動く）。
+> 恒久的にポリシーを緩めたい場合のみ `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` を検討。
 
 ### 4. スマホから開く
 
@@ -165,10 +187,10 @@ Get-NetIPAddress -AddressFamily IPv4 |
   Select-Object IPAddress, InterfaceAlias
 ```
 
-スマホ（PC と同じ Wi-Fi）のブラウザで次を開く:
+スマホ（PC と同じ Wi-Fi）のブラウザで次を開く（**ポートは 8001**）:
 
 ```
-http://<PCのLAN内IP>:8000/u/<token>
+http://<PCのLAN内IP>:8001/u/<token>
 ```
 
 写真を選んで「投函する」を押すと、観察へ取り込まれ「n 枚受け付けました（完了/失敗/対象外）」が表示される。カメラロールから複数選択可（`accept="image/*"`、受理は jpg/png のみ）。1 回の上限は 20 枚・合計 64 MiB。
@@ -184,18 +206,18 @@ nichijou/
 ├── .gitignore                  # *.db / photos/ / secrets/ / logs/ を除外
 ├── README.md
 ├── LICENSE
-├── install-autostart.sh        # 自動起動セットアップ（sudo で1回実行。--host 0.0.0.0）
-├── start.sh / stop.sh          # 手動起動フォールバック（127.0.0.1 のまま）
+├── install-autostart.sh        # 自動起動セットアップ（日記=127.0.0.1:8000 と投函口=0.0.0.0:8001 の2サービス）
+├── start.sh / stop.sh          # 手動起動フォールバック（日記のみ・127.0.0.1）
 ├── windows/
 │   ├── nichijou-autostart.vbs   # （旧）Windowsログイン時にWSLを起こすトリガ
-│   └── nichijou-portproxy.ps1   # ログオン時に portproxy を現WSL-IPへ張り直す（要・昇格）
+│   └── nichijou-portproxy.ps1   # ログオン時に 8001 を現WSL-IPへ転送（要・昇格。8000は転送しない）
 ├── secrets/                    # APIキー・投函トークン（gitignore・非公開）
 │   ├── anthropic.env            #   ANTHROPIC_API_KEY
 │   └── upload.token             #   投函口トークン（64 hex）
 ├── photos/                     # 観察写真の実体（gitignore・非公開）
 ├── nichijou.db                 # 日乗＋観察のメタデータ（gitignore・非公開）
 └── app/
-    ├── main.py                 # ルーティング（日乗 / 観察 / 投函口）＋ ループバック制限ミドルウェア
+    ├── main.py                 # ルーティング（日乗 / 観察 / 投函口）＋ 投函口専用モード（NICHIJOU_LAN_ONLY）
     ├── db.py                   # 保存層（ここだけが SQLite を知る）
     ├── vision.py               # 写真の種類判定（Anthropic vision）
     └── templates/
