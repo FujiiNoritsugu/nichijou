@@ -156,7 +156,7 @@ def _ingest_one(data: bytes, content_type: str | None) -> str | None:
     filename = _save_photo(data, ext)
     taken_at = _read_taken_at(db.PHOTOS_DIR / filename)
     try:
-        j = vision.classify(data, content_type)
+        j = vision.classify(data, content_type, taken_at)
         db.add_observation(filename, j.species, j.confidence, j.comment, "done", taken_at)
         return "done"
     except Exception:
@@ -217,7 +217,7 @@ def reclassify_observation(obs_id: int):
         media_type = "image/png" if obs.filename.endswith(".png") else "image/jpeg"
         try:
             data = (db.PHOTOS_DIR / obs.filename).read_bytes()
-            j = vision.classify(data, media_type)
+            j = vision.classify(data, media_type, obs.taken_at)
             db.update_observation_result(obs_id, j.species, j.confidence, j.comment, "done")
         except Exception:
             db.update_observation_result(obs_id, None, None, None, "failed")
