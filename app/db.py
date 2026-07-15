@@ -87,20 +87,45 @@ def add_entry(body: str) -> None:
         )
 
 
+def _row_to_entry(row: sqlite3.Row) -> Entry:
+    return Entry(
+        id=row["id"],
+        body=row["body"],
+        created_at=datetime.fromisoformat(row["created_at"]),
+    )
+
+
 def list_entries() -> list[Entry]:
     """全件を新しい順（created_at 降順、同時刻は id 降順）で返す。"""
     with _connect() as conn:
         rows = conn.execute(
             "SELECT id, body, created_at FROM entries ORDER BY created_at DESC, id DESC"
         ).fetchall()
-    return [
-        Entry(
-            id=row["id"],
-            body=row["body"],
-            created_at=datetime.fromisoformat(row["created_at"]),
-        )
-        for row in rows
-    ]
+    return [_row_to_entry(row) for row in rows]
+
+
+# LIKE のワイルドカード（% _）と、下の ESCAPE 文字自身を打ち消すための変換表。
+# 利用者の入力はあくまで「文字列」であって、パターン言語ではない。
+_LIKE_ESCAPE = str.maketrans({"\\": "\\\\", "%": "\\%", "_": "\\_"})
+
+
+def search_entries(q: str) -> list[Entry]:
+    """本文に q を含む記録を新しい順で返す（部分一致）。
+
+    LIKE で足りる規模（個人利用の数百〜数千件）なので FTS5 は入れない。
+    ASCII の大文字小文字は SQLite の LIKE が既定で無視する。日本語は
+    そもそも区別が無いので、これで用は足りる。"""
+    pattern = f"%{q.translate(_LIKE_ESCAPE)}%"
+    with _connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, body, created_at FROM entries
+            WHERE body LIKE ? ESCAPE '\\'
+            ORDER BY created_at DESC, id DESC
+            """,
+            (pattern,),
+        ).fetchall()
+    return [_row_to_entry(row) for row in rows]
 
 
 def delete_entry(entry_id: int) -> None:

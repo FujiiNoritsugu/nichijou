@@ -1,0 +1,16 @@
+{# 記録の一覧。日乗トップと検索結果で同じ見た目を保つための共通部品。
+   呼び出し側は entries（Entry の列）を渡す。空のときの文言は呼び出し側が決める。 #}
+<ul class="entries">
+  {% for entry in entries %}
+  <li class="entry">
+    <div class="meta">
+      <span>{{ entry.created_at | local }}</span>
+      <form class="delete" action="/entries/{{ entry.id }}/delete" method="post"
+            onsubmit="return confirm('この記録を削除します。よろしいですか？');">
+        <button type="submit">削除</button>
+      </form>
+    </div>
+    <div class="body">{{ entry.body }}</div>
+  </li>
+  {% endfor %}
+</ul>

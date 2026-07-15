@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>日乗</title>
+  <title>検索 — 日乗</title>
   <style>
     :root { color-scheme: light dark; }
     body {
@@ -17,26 +17,6 @@
     h1 { font-size: 1.1rem; font-weight: 600; letter-spacing: 0.1em; margin: 0 0 0.4rem; opacity: 0.7; }
     .nav { font-size: 0.8rem; opacity: 0.55; margin-bottom: 1.6rem; }
     .nav a { color: inherit; }
-    form.compose { margin-bottom: 2.2rem; }
-    textarea {
-      width: 100%;
-      box-sizing: border-box;
-      min-height: 5.5rem;
-      padding: 0.7rem 0.8rem;
-      font: inherit;
-      border: 1px solid rgba(128,128,128,0.4);
-      border-radius: 6px;
-      resize: vertical;
-    }
-    .compose button {
-      margin-top: 0.6rem;
-      padding: 0.45rem 1.4rem;
-      font: inherit;
-      cursor: pointer;
-      border: 1px solid rgba(128,128,128,0.5);
-      border-radius: 6px;
-      background: transparent;
-    }
     form.search { margin-bottom: 1.4rem; }
     .search input {
       width: 100%;
@@ -49,6 +29,7 @@
       background: transparent;
       color: inherit;
     }
+    .count { font-size: 0.8rem; opacity: 0.55; margin: 0 0 0.4rem; }
     ul.entries { list-style: none; padding: 0; margin: 0; }
     li.entry {
       padding: 0.9rem 0;
@@ -69,22 +50,20 @@
   </style>
 </head>
 <body>
-  <h1>日乗</h1>
-  <div class="nav"><a href="/observations">観察 →</a></div>
-
-  <form class="compose" action="/entries" method="post">
-    <textarea name="body" autofocus placeholder="きょうのこと"></textarea>
-    <div><button type="submit">記す</button></div>
-  </form>
+  <h1>検索</h1>
+  <div class="nav"><a href="/">← 日乗</a></div>
 
   <form class="search" action="/search" method="get">
-    <input type="search" name="q" placeholder="検索">
+    <input type="search" name="q" value="{{ q }}" autofocus placeholder="検索">
   </form>
 
-  {% if entries %}
-  {% include "_entries.html" %}
-  {% else %}
-  <p class="empty">まだ何も記されていません。</p>
+  {% if q %}
+    {% if entries %}
+    <p class="count">{{ entries | length }}件</p>
+    {% include "_entries.html" %}
+    {% else %}
+    <p class="empty">見つかりませんでした。</p>
+    {% endif %}
   {% endif %}
 </body>
 </html>

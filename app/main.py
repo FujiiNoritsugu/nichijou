@@ -192,6 +192,15 @@ def remove_entry(entry_id: int):
     return RedirectResponse(url="/", status_code=303)
 
 
+@app.get("/search")
+def search(request: Request, q: str = ""):
+    """記録を読み返すための検索。書き換えはしない（読むだけのルート）。
+    q が空なら検索せず、フォームだけを出す。"""
+    q = q.strip()
+    entries = db.search_entries(q) if q else []
+    return templates.TemplateResponse(request, "search.html", {"q": q, "entries": entries})
+
+
 # --- 観察（写真＋AI判定） -------------------------------------------------
 
 @app.get("/observations")
