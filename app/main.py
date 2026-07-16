@@ -155,8 +155,11 @@ def _ingest_one(data: bytes, content_type: str | None) -> str | None:
         return None
     filename = _save_photo(data, ext)
     taken_at = _read_taken_at(db.PHOTOS_DIR / filename)
+    # 直近の観察履歴（日付＋種名）を判定へ渡す。この観察はまだ DB に無いので
+    # 除外は不要。履歴が空（初観察）でも classify は従来どおり動く。
+    history = db.recent_observations_for_context()
     try:
-        j = vision.classify(data, content_type, taken_at)
+        j = vision.classify(data, content_type, taken_at, history)
         db.add_observation(filename, j.species, j.confidence, j.comment, "done", taken_at)
         return "done"
     except Exception:
@@ -226,7 +229,9 @@ def reclassify_observation(obs_id: int):
         media_type = "image/png" if obs.filename.endswith(".png") else "image/jpeg"
         try:
             data = (db.PHOTOS_DIR / obs.filename).read_bytes()
-            j = vision.classify(data, media_type, obs.taken_at)
+            # 再判定では自分自身を履歴から外す（自分を「再登場」と誤読させない）。
+            history = db.recent_observations_for_context(exclude_id=obs_id)
+            j = vision.classify(data, media_type, obs.taken_at, history)
             db.update_observation_result(obs_id, j.species, j.confidence, j.comment, "done")
         except Exception:
             db.update_observation_result(obs_id, None, None, None, "failed")

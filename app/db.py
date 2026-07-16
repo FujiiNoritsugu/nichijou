@@ -182,6 +182,33 @@ def list_observations() -> list[Observation]:
     return [_row_to_observation(row) for row in rows]
 
 
+def recent_observations_for_context(
+    limit: int = 20, exclude_id: int | None = None
+) -> list[tuple[datetime, str]]:
+    """AI 判定時にプロンプトへ添える「直近の観察履歴」を新しい順で返す。
+
+    種名が確定した観察（status='done' かつ species あり）だけを、撮影日時と
+    種名のペアで返す。写真や本文は渡さない（プロンプトを短く保つ）。判定失敗の
+    行や種名 None は履歴として無意味なので除く。exclude_id を渡すと、その観察を
+    履歴から外す（再判定で自分自身が履歴に混ざるのを防ぐ）。
+
+    種名は AI が返す文字列そのままなので、突合（同種の再登場かどうか）はここでは
+    せず、この一覧を見た判定モデルに委ねる（無理な正規化はしない方針）。"""
+    sql = (
+        "SELECT taken_at, species FROM observations "
+        "WHERE status = 'done' AND species IS NOT NULL AND species != ''"
+    )
+    params: list[object] = []
+    if exclude_id is not None:
+        sql += " AND id != ?"
+        params.append(exclude_id)
+    sql += " ORDER BY taken_at DESC, id DESC LIMIT ?"
+    params.append(limit)
+    with _connect() as conn:
+        rows = conn.execute(sql, tuple(params)).fetchall()
+    return [(datetime.fromisoformat(r["taken_at"]), r["species"]) for r in rows]
+
+
 def get_observation(obs_id: int) -> Observation | None:
     """1件取得する（再判定で写真ファイル名が必要になる）。"""
     with _connect() as conn:
