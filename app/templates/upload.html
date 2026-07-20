@@ -29,6 +29,18 @@
       background: rgba(128,128,128,0.06);
       box-sizing: border-box;
     }
+    input[type="text"] {
+      font: inherit;
+      width: 100%;
+      padding: 0.75rem 0.8rem;
+      border: 1px solid rgba(128,128,128,0.4);
+      border-radius: 10px;
+      background: transparent;
+      color: inherit;
+      box-sizing: border-box;
+    }
+    .note-field { display: flex; flex-direction: column; gap: 0.35rem; }
+    .note-field .hint { font-size: 0.75rem; opacity: 0.5; }
     button {
       font: inherit;
       font-size: 1.05rem;
@@ -68,6 +80,11 @@
 
   <form class="drop" action="/u/{{ token }}" method="post" enctype="multipart/form-data">
     <input type="file" name="photos" accept="image/*" multiple required>
+    <div class="note-field">
+      <input type="text" name="observer_note"
+             placeholder="メモ（任意）: 大きさ、動き、心当たりの種など">
+      <span class="hint">メモは今回の写真すべてに適用されます</span>
+    </div>
     <button type="submit">投函する</button>
   </form>
 </body>

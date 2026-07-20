@@ -121,6 +121,15 @@ def _format_local(dt) -> str:
 templates.env.filters["local"] = _format_local
 
 
+def _clean_note(note: str | None) -> str | None:
+    """フォームの観察者メモを正規化する。空白のみ／未入力は None に落とす
+    （DB を「メモ無し＝NULL」で揃え、判定プロンプトも従来と同一に保つ）。"""
+    if note is None:
+        return None
+    note = note.strip()
+    return note or None
+
+
 def _save_photo(data: bytes, ext: str) -> str:
     """写真をサーバ採番のファイル名で保存し、そのファイル名を返す。
     原名は使わない（衝突回避・パストラバーサル無効化）。"""
@@ -145,10 +154,13 @@ def _read_taken_at(path: Path) -> datetime | None:
         return None
 
 
-def _ingest_one(data: bytes, content_type: str | None) -> str | None:
+def _ingest_one(
+    data: bytes, content_type: str | None, observer_note: str | None = None
+) -> str | None:
     """写真1枚を 保存→EXIF→AI判定→DB へ取り込む。観察の取り込み処理の実体。
     戻り値は status（"done"／"failed"）。jpg/png 以外は取り込まず None（対象外）。
-    観察ルートと投函口の両方がこの経路を共有する。"""
+    観察ルートと投函口の両方がこの経路を共有する。observer_note（任意の現場メモ）は
+    判定と保存の両方に渡す（空なら None のまま。従来と同一の挙動）。"""
     ext = _ALLOWED_IMAGES.get(content_type or "")
     if ext is None:
         # jpg/png 以外は取り込まない（既存の拡張子制限）。
@@ -159,12 +171,16 @@ def _ingest_one(data: bytes, content_type: str | None) -> str | None:
     # 除外は不要。履歴が空（初観察）でも classify は従来どおり動く。
     history = db.recent_observations_for_context()
     try:
-        j = vision.classify(data, content_type, taken_at, history)
-        db.add_observation(filename, j.species, j.confidence, j.comment, "done", taken_at)
+        j = vision.classify(data, content_type, taken_at, history, observer_note)
+        db.add_observation(
+            filename, j.species, j.confidence, j.comment, "done", taken_at, observer_note
+        )
         return "done"
     except Exception:
         # 判定に失敗しても写真は残す。後から再判定でやり直せる。
-        db.add_observation(filename, None, None, None, "failed", taken_at)
+        db.add_observation(
+            filename, None, None, None, "failed", taken_at, observer_note
+        )
         return "failed"
 
 
@@ -214,16 +230,23 @@ def observations(request: Request):
 
 
 @app.post("/observations")
-async def create_observations(photos: list[UploadFile] = File(...)):
+async def create_observations(
+    photos: list[UploadFile] = File(...),
+    observer_note: str = Form(""),
+):
+    # メモは任意。この取り込みバッチの全写真に同じメモを適用する。
+    note = _clean_note(observer_note)
     for photo in photos:
         data = await photo.read()
         # jpg/png 以外は _ingest_one が None を返す＝黙って無視（従来どおり）。
-        _ingest_one(data, photo.content_type)
+        _ingest_one(data, photo.content_type, note)
     return RedirectResponse(url="/observations", status_code=303)
 
 
 @app.post("/observations/{obs_id}/reclassify")
-def reclassify_observation(obs_id: int):
+def reclassify_observation(obs_id: int, observer_note: str = Form("")):
+    # 再判定時はメモを保存し直した上で判定に渡す（フォームで修正できる）。
+    note = _clean_note(observer_note)
     obs = db.get_observation(obs_id)
     if obs is not None:
         media_type = "image/png" if obs.filename.endswith(".png") else "image/jpeg"
@@ -231,10 +254,12 @@ def reclassify_observation(obs_id: int):
             data = (db.PHOTOS_DIR / obs.filename).read_bytes()
             # 再判定では自分自身を履歴から外す（自分を「再登場」と誤読させない）。
             history = db.recent_observations_for_context(exclude_id=obs_id)
-            j = vision.classify(data, media_type, obs.taken_at, history)
-            db.update_observation_result(obs_id, j.species, j.confidence, j.comment, "done")
+            j = vision.classify(data, media_type, obs.taken_at, history, note)
+            db.update_observation_result(
+                obs_id, j.species, j.confidence, j.comment, "done", note
+            )
         except Exception:
-            db.update_observation_result(obs_id, None, None, None, "failed")
+            db.update_observation_result(obs_id, None, None, None, "failed", note)
     return RedirectResponse(url="/observations", status_code=303)
 
 
@@ -265,9 +290,17 @@ def drop_form(request: Request, token: str):
 
 
 @app.post("/u/{token}")
-async def drop_submit(request: Request, token: str, photos: list[UploadFile] = File(...)):
+async def drop_submit(
+    request: Request,
+    token: str,
+    photos: list[UploadFile] = File(...),
+    observer_note: str = Form(""),
+):
     if not _token_ok(token):
         return PlainTextResponse("not found", status_code=404)
+
+    # メモは任意。この投函バッチの全写真に同じメモを適用する。
+    note = _clean_note(observer_note)
 
     # 上限チェック（読み込み前に。メモリ枯渇と乱用を防ぐ）。
     if len(photos) > _UPLOAD_MAX_FILES:
@@ -293,7 +326,7 @@ async def drop_submit(request: Request, token: str, photos: list[UploadFile] = F
                 f"合計サイズが大きすぎます（上限 {_UPLOAD_MAX_TOTAL_BYTES // (1024 * 1024)} MiB）",
                 status_code=413,
             )
-        status = _ingest_one(data, photo.content_type)
+        status = _ingest_one(data, photo.content_type, note)
         if status == "done":
             done += 1
         elif status == "failed":

@@ -40,6 +40,7 @@ class Observation:
     status: str              # "done"（判定済）／"failed"（判定失敗）。
     taken_at: datetime       # 撮影日時（EXIF）。無ければ登録日時で代用。tz-aware（UTC）。
     created_at: datetime     # 登録日時。tz-aware（UTC）。
+    observer_note: str | None = None  # 観察者が現場で添える任意メモ。無ければ None。
 
 
 def _connect() -> sqlite3.Connection:
@@ -64,17 +65,23 @@ def init_db() -> None:
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS observations (
-                id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                filename    TEXT NOT NULL,
-                species     TEXT,
-                confidence  TEXT,
-                comment     TEXT,
-                status      TEXT NOT NULL,
-                taken_at    TEXT NOT NULL,
-                created_at  TEXT NOT NULL
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                filename      TEXT NOT NULL,
+                species       TEXT,
+                confidence    TEXT,
+                comment       TEXT,
+                status        TEXT NOT NULL,
+                taken_at      TEXT NOT NULL,
+                created_at    TEXT NOT NULL,
+                observer_note TEXT
             )
             """
         )
+        # 既存 DB への軽量マイグレーション。observer_note を後付けした（NULL 可）。
+        # 既存レコードは NULL のままでよい。カラムが既にあれば何もしない。
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(observations)")}
+        if "observer_note" not in cols:
+            conn.execute("ALTER TABLE observations ADD COLUMN observer_note TEXT")
 
 
 def add_entry(body: str) -> None:
@@ -146,6 +153,7 @@ def _row_to_observation(row: sqlite3.Row) -> Observation:
         status=row["status"],
         taken_at=datetime.fromisoformat(row["taken_at"]),
         created_at=datetime.fromisoformat(row["created_at"]),
+        observer_note=row["observer_note"],
     )
 
 
@@ -156,20 +164,23 @@ def add_observation(
     comment: str | None,
     status: str,
     taken_at: datetime | None,
+    observer_note: str | None = None,
 ) -> None:
     """観察を1件保存する。created_at はサーバ側で UTC を打つ。
-    taken_at（撮影日時）が無ければ登録日時で代用する。"""
+    taken_at（撮影日時）が無ければ登録日時で代用する。
+    observer_note は観察者が現場で添える任意メモ（空なら None）。"""
     created = datetime.now(timezone.utc)
     taken = taken_at or created
     with _connect() as conn:
         conn.execute(
             """
             INSERT INTO observations
-                (filename, species, confidence, comment, status, taken_at, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+                (filename, species, confidence, comment, status, taken_at, created_at,
+                 observer_note)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (filename, species, confidence, comment, status,
-             taken.isoformat(), created.isoformat()),
+             taken.isoformat(), created.isoformat(), observer_note),
         )
 
 
@@ -224,12 +235,15 @@ def update_observation_result(
     confidence: str | None,
     comment: str | None,
     status: str,
+    observer_note: str | None = None,
 ) -> None:
-    """AI 判定結果だけを上書きする（再判定用）。撮影/登録日時や写真は変えない。"""
+    """AI 判定結果を上書きする（再判定用）。撮影/登録日時や写真は変えない。
+    observer_note も一緒に上書きする（再判定フォームで修正できるため）。"""
     with _connect() as conn:
         conn.execute(
-            "UPDATE observations SET species = ?, confidence = ?, comment = ?, status = ? WHERE id = ?",
-            (species, confidence, comment, status, obs_id),
+            "UPDATE observations SET species = ?, confidence = ?, comment = ?, "
+            "status = ?, observer_note = ? WHERE id = ?",
+            (species, confidence, comment, status, observer_note, obs_id),
         )
 
 

@@ -19,6 +19,17 @@
     .nav a { color: inherit; }
     form.compose { margin-bottom: 2.2rem; }
     .compose input[type="file"] { font: inherit; }
+    .compose input[type="text"] {
+      font: inherit;
+      margin-top: 0.6rem;
+      width: 100%;
+      padding: 0.4rem 0.5rem;
+      box-sizing: border-box;
+      border: 1px solid rgba(128,128,128,0.4);
+      border-radius: 6px;
+      background: transparent;
+      color: inherit;
+    }
     .compose button {
       margin-top: 0.6rem;
       padding: 0.45rem 1.4rem;
@@ -48,6 +59,7 @@
     .species { font-weight: 600; margin-top: 0.15rem; word-break: break-word; }
     .confidence { font-size: 0.78rem; opacity: 0.65; }
     .comment { margin-top: 0.2rem; word-break: break-word; }
+    .note { margin-top: 0.25rem; font-size: 0.78rem; opacity: 0.5; word-break: break-word; }
     .failed { opacity: 0.6; }
     .actions { display: flex; gap: 0.8rem; }
     .actions button {
@@ -60,6 +72,29 @@
       color: inherit;
     }
     .actions button:hover { opacity: 1; }
+    form.reclassify { display: flex; gap: 0.4rem; margin-top: 0.55rem; align-items: center; }
+    form.reclassify input[type="text"] {
+      font: inherit;
+      font-size: 0.78rem;
+      flex: 1;
+      min-width: 0;
+      padding: 0.25rem 0.4rem;
+      border: 1px solid rgba(128,128,128,0.35);
+      border-radius: 5px;
+      background: transparent;
+      color: inherit;
+    }
+    form.reclassify button {
+      font-size: 0.75rem;
+      white-space: nowrap;
+      background: none;
+      border: none;
+      cursor: pointer;
+      opacity: 0.55;
+      padding: 0;
+      color: inherit;
+    }
+    form.reclassify button:hover { opacity: 1; }
     .empty { opacity: 0.5; font-size: 0.9rem; }
   </style>
 </head>
@@ -69,6 +104,8 @@
 
   <form class="compose" action="/observations" method="post" enctype="multipart/form-data">
     <div><input type="file" name="photos" accept="image/jpeg,image/png" multiple required></div>
+    <div><input type="text" name="observer_note"
+                placeholder="メモ（任意）: 大きさ、動き、心当たりの種など"></div>
     <div><button type="submit">取り込む</button></div>
   </form>
 
@@ -83,9 +120,6 @@
         <div class="meta">
           <span>{{ obs.taken_at | local }}</span>
           <span class="actions">
-            <form action="/observations/{{ obs.id }}/reclassify" method="post">
-              <button type="submit">再判定</button>
-            </form>
             <form action="/observations/{{ obs.id }}/delete" method="post"
                   onsubmit="return confirm('この観察を削除します。よろしいですか？');">
               <button type="submit">削除</button>
@@ -99,6 +133,14 @@
         <div class="species failed">判定失敗</div>
         <div class="comment failed">「再判定」でもう一度 AI に問い合わせられます。</div>
         {% endif %}
+        {% if obs.observer_note %}
+        <div class="note">メモ: {{ obs.observer_note }}</div>
+        {% endif %}
+        <form class="reclassify" action="/observations/{{ obs.id }}/reclassify" method="post">
+          <input type="text" name="observer_note" value="{{ obs.observer_note or '' }}"
+                 placeholder="メモ（任意）: 大きさ、動き、心当たりの種など">
+          <button type="submit">再判定</button>
+        </form>
       </div>
     </li>
     {% endfor %}

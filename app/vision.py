@@ -52,6 +52,18 @@ _SEASON_HINT = (
     "ただし時期だけで断定せず、画像の特徴と矛盾する場合は画像を優先してください。"
 )
 
+# 観察者が現場で添えたメモ。AI は写真しか見ていないが、観察者は実物を見ており、
+# 大きさ・動き・鳴き声など写真に写らない情報を持つ。この非対称を補うために渡す。
+# ただし同定はあくまで画像の特徴に基づいて独立に行わせ、メモに迎合させない。
+_NOTE_HINT = (
+    "\n\n観察者が現場で次のメモを添えています: 「{note}」\n"
+    "これは現場でしか得られない貴重な情報（大きさ・行動・鳴き声、心当たりの種など）"
+    "として考慮してください。ただし同定は画像の特徴に基づいて独立に行ってください。"
+    "メモの推測と画像の特徴が矛盾する場合は画像を優先し、その旨を comment で丁寧に"
+    "述べてください（例: メモでは◯◯とのことですが、画像の△△からは□□と思われます）。"
+    "メモに迎合しないでください。"
+)
+
 # 過去の観察を踏まえた「観察者への一言」を促すためのヒント。履歴があるときだけ添える。
 # 同種の再登場・今年初・頻度の変化など、本当に繋がりがある場合のみ触れさせ、無理に
 # 過去へ繋げないよう明示的に抑制する（散歩の相棒の、静かな一言に留める）。
@@ -76,9 +88,11 @@ def _format_history(history: list[tuple[datetime, str]]) -> str:
 
 
 def _build_prompt(
-    taken_at: datetime | None, history: list[tuple[datetime, str]] | None
+    taken_at: datetime | None,
+    history: list[tuple[datetime, str]] | None,
+    observer_note: str | None = None,
 ) -> str:
-    """基本プロンプトに、撮影月のヒントと（あれば）観察履歴を添えて返す。"""
+    """基本プロンプトに、撮影月のヒント・観察履歴・観察者メモを（あれば）添えて返す。"""
     prompt = _PROMPT
     if taken_at is not None:
         prompt += _SEASON_HINT.format(month=taken_at.astimezone().month)
@@ -86,6 +100,9 @@ def _build_prompt(
         # 撮影日が無い写真でも履歴照合はできるよう、日付は taken_at 依存にしない。
         date = f"{taken_at.astimezone():%Y-%m-%d}" if taken_at is not None else "不明"
         prompt += _HISTORY_HINT.format(date=date, lines=_format_history(history))
+    # 観察者メモは、あるときだけ添える（無ければ従来と同一のプロンプト）。
+    if observer_note and observer_note.strip():
+        prompt += _NOTE_HINT.format(note=observer_note.strip())
     return prompt
 
 
@@ -101,16 +118,19 @@ def classify(
     media_type: str,
     taken_at: datetime | None = None,
     history: list[tuple[datetime, str]] | None = None,
+    observer_note: str | None = None,
 ) -> Judgement:
     """写真を判定する。失敗時は例外を送出する（呼び出し側で捕捉する）。
 
     taken_at（撮影日時）を渡すと、その月を同定の補助手がかりとしてプロンプトに
     添える。history（直近の観察の日付＋種名。db 側で取得して渡す）を渡すと、
-    同定した種が履歴にあれば、それを踏まえた一言を comment に含めさせる。どちらも
-    無ければ従来どおり画像のみで判定する（1 コールで完結する。2 段階にはしない）。"""
+    同定した種が履歴にあれば、それを踏まえた一言を comment に含めさせる。
+    observer_note（観察者が現場で添えたメモ）を渡すと、写真に写らない現場情報
+    として考慮させる（同定は画像に基づき独立に行わせ、メモには迎合させない）。
+    いずれも無ければ従来どおり画像のみで判定する（1 コールで完結。2 段階にしない）。"""
     client = anthropic.Anthropic()
     data = base64.standard_b64encode(image_bytes).decode("utf-8")
-    prompt = _build_prompt(taken_at, history)
+    prompt = _build_prompt(taken_at, history, observer_note)
     response = client.messages.create(
         model=MODEL,
         max_tokens=1024,
