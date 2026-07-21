@@ -4,6 +4,7 @@ nichijou.db-journal
 nichijou.db-wal
 nichijou.db-shm
 *.db
+*.db.bak*
 
 # --- 観察写真（個人情報＝位置情報付きの可能性。絶対にコミットしない） ---
 photos/

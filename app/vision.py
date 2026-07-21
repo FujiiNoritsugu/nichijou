@@ -1,11 +1,16 @@
 """AI 判定層。
 
-写真1枚を Anthropic の vision モデルに渡し、種類・確信度・一言コメントを得る。
-判定ロジックはこのモジュールに閉じる（db が SQLite を独占するのと同じ整理）。
+同じ被写体を写した写真（1枚以上）を Anthropic の vision モデルに1回で渡し、
+種類・確信度・一言コメントを得る。判定ロジックはこのモジュールに閉じる
+（db が SQLite を独占するのと同じ整理）。
+
+複数枚渡せるのは、1枚では角度や解像度の都合で外すことがあるため。複数の
+手がかりを突き合わせれば同定精度が上がる。コスト増は画像枚数分の入力トークン
+だけで、API コール自体は観察1件につき1回のまま。
 
 API キーは環境変数 ANTHROPIC_API_KEY から読む（コード・リポジトリには置かない）。
-呼び出しは保存時に写真1枚あたり1回。失敗（ネット断・タイムアウト等）は例外として
-呼び出し側へ伝え、そちらで「判定失敗」状態にする。
+失敗（ネット断・タイムアウト等）は例外として呼び出し側へ伝え、そちらで
+「判定失敗」状態にする。
 """
 
 from __future__ import annotations
@@ -31,6 +36,17 @@ _SCHEMA = {
     "required": ["species", "confidence", "comment"],
     "additionalProperties": False,
 }
+
+# 複数枚を渡すときだけ先頭に添える前置き。「別々の被写体を並べた」のではなく
+# 「同じ被写体を複数の角度・解像度で撮った」ものだと明示し、不鮮明な1枚に
+# 引きずられて全体の判断を落とすことを防ぐ。
+_MULTI_PREFIX = (
+    "これから{n}枚の写真を示します。これらは同一の被写体を複数の角度・解像度で"
+    "撮影したものです。別々の対象ではありません。全ての写真を総合して、1つの種として"
+    "同定してください。解像度が高く特徴が明瞭に写っている写真を重視し、不鮮明な写真や"
+    "写りの悪い角度の写真に引きずられないでください。写真ごとに別々の答えを出さず、"
+    "最終的な同定は1つだけ返してください。\n\n"
+)
 
 _PROMPT = (
     "これは日本の川沿いで撮影された生き物または植物の写真です。"
@@ -91,9 +107,11 @@ def _build_prompt(
     taken_at: datetime | None,
     history: list[tuple[datetime, str]] | None,
     observer_note: str | None = None,
+    image_count: int = 1,
 ) -> str:
-    """基本プロンプトに、撮影月のヒント・観察履歴・観察者メモを（あれば）添えて返す。"""
-    prompt = _PROMPT
+    """基本プロンプトに、複数枚の前置き・撮影月のヒント・観察履歴・観察者メモを
+    （あれば）添えて返す。1枚のときは従来と同一のプロンプトになる。"""
+    prompt = (_MULTI_PREFIX.format(n=image_count) if image_count > 1 else "") + _PROMPT
     if taken_at is not None:
         prompt += _SEASON_HINT.format(month=taken_at.astimezone().month)
     if history:
@@ -114,13 +132,16 @@ class Judgement:
 
 
 def classify(
-    image_bytes: bytes,
-    media_type: str,
+    images: list[tuple[bytes, str]],
     taken_at: datetime | None = None,
     history: list[tuple[datetime, str]] | None = None,
     observer_note: str | None = None,
 ) -> Judgement:
-    """写真を判定する。失敗時は例外を送出する（呼び出し側で捕捉する）。
+    """同じ被写体の写真（1枚以上）をまとめて判定する。images は
+    (画像バイト列, media_type) の並び。失敗時は例外を送出する（呼び出し側で捕捉）。
+
+    複数枚あるときは1つの user メッセージに複数の image ブロックとして並べ、
+    総合して1種を同定させる（API コールは1回）。1枚のときは従来と同じ挙動。
 
     taken_at（撮影日時）を渡すと、その月を同定の補助手がかりとしてプロンプトに
     添える。history（直近の観察の日付＋種名。db 側で取得して渡す）を渡すと、
@@ -128,28 +149,28 @@ def classify(
     observer_note（観察者が現場で添えたメモ）を渡すと、写真に写らない現場情報
     として考慮させる（同定は画像に基づき独立に行わせ、メモには迎合させない）。
     いずれも無ければ従来どおり画像のみで判定する（1 コールで完結。2 段階にしない）。"""
+    if not images:
+        raise ValueError("判定には写真が最低1枚必要")
     client = anthropic.Anthropic()
-    data = base64.standard_b64encode(image_bytes).decode("utf-8")
-    prompt = _build_prompt(taken_at, history, observer_note)
+    prompt = _build_prompt(taken_at, history, observer_note, image_count=len(images))
+    # 画像を先に並べ、最後に指示文を置く（複数画像でも指示が末尾で効くように）。
+    content: list[dict] = []
+    for image_bytes, media_type in images:
+        content.append(
+            {
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": media_type,
+                    "data": base64.standard_b64encode(image_bytes).decode("utf-8"),
+                },
+            }
+        )
+    content.append({"type": "text", "text": prompt})
     response = client.messages.create(
         model=MODEL,
         max_tokens=1024,
-        messages=[
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "image",
-                        "source": {
-                            "type": "base64",
-                            "media_type": media_type,
-                            "data": data,
-                        },
-                    },
-                    {"type": "text", "text": prompt},
-                ],
-            }
-        ],
+        messages=[{"role": "user", "content": content}],
         output_config={"format": {"type": "json_schema", "schema": _SCHEMA}},
     )
     # 構造化出力なので先頭の text ブロックは有効な JSON。

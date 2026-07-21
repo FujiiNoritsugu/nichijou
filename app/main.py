@@ -28,8 +28,12 @@ from . import db, vision
 # 投函口は全て 404（fail-closed。トークンを置かない限り投函口は存在しない）。
 _UPLOAD_TOKEN_PATH = Path(__file__).resolve().parent.parent / "secrets" / "upload.token"
 
+# 1回の投函（＝1つの観察）に含められる写真の上限。同じ被写体を複数アングルで
+# 撮る用途に対して常識的な枚数。判定は全画像を1コールに載せるので、青天井にすると
+# 入力トークンとレイテンシがそのまま膨らむ。
+_MAX_PHOTOS_PER_OBSERVATION = 8
+
 # 投函口の受理上限（LAN 露出面なので常識的な値で明示的に絞る）。
-_UPLOAD_MAX_FILES = 20
 _UPLOAD_MAX_TOTAL_BYTES = 64 * 1024 * 1024  # 64 MiB
 
 # このインスタンスが「LAN 公開の投函口専用」かどうか（環境変数で切り替える）。
@@ -154,34 +158,51 @@ def _read_taken_at(path: Path) -> datetime | None:
         return None
 
 
-def _ingest_one(
-    data: bytes, content_type: str | None, observer_note: str | None = None
-) -> str | None:
-    """写真1枚を 保存→EXIF→AI判定→DB へ取り込む。観察の取り込み処理の実体。
-    戻り値は status（"done"／"failed"）。jpg/png 以外は取り込まず None（対象外）。
-    観察ルートと投函口の両方がこの経路を共有する。observer_note（任意の現場メモ）は
-    判定と保存の両方に渡す（空なら None のまま。従来と同一の挙動）。"""
-    ext = _ALLOWED_IMAGES.get(content_type or "")
-    if ext is None:
-        # jpg/png 以外は取り込まない（既存の拡張子制限）。
-        return None
-    filename = _save_photo(data, ext)
-    taken_at = _read_taken_at(db.PHOTOS_DIR / filename)
+def _media_type_of(filename: str) -> str:
+    """保存済みファイル名から media_type を引く（拡張子はこちらで採番している）。"""
+    return "image/png" if filename.endswith(".png") else "image/jpeg"
+
+
+def _ingest_observation(
+    files: list[tuple[bytes, str | None]], observer_note: str | None = None
+) -> tuple[str | None, int]:
+    """1回の投函を 保存→EXIF→AI判定→DB へ取り込む。観察の取り込み処理の実体。
+
+    files に複数枚あれば「同じ被写体の複数アングル」とみなし、1つの観察として
+    登録して1回の判定にまとめて渡す（1投函＝1観察）。戻り値は
+    (status, 対象外だった枚数)。status は "done"／"failed"、jpg/png が1枚も
+    無ければ None（観察を作らない）。観察ルートと投函口の両方がこの経路を共有する。
+    observer_note（任意の現場メモ）は判定と保存の両方に渡す（空なら None）。"""
+    saved: list[tuple[str, datetime | None]] = []  # (ファイル名, 撮影日時)
+    images: list[tuple[bytes, str]] = []           # (バイト列, media_type)
+    skipped = 0
+    for data, content_type in files:
+        ext = _ALLOWED_IMAGES.get(content_type or "")
+        if ext is None:
+            # jpg/png 以外は取り込まない（既存の拡張子制限）。
+            skipped += 1
+            continue
+        filename = _save_photo(data, ext)
+        saved.append((filename, _read_taken_at(db.PHOTOS_DIR / filename)))
+        images.append((data, content_type))
+    if not saved:
+        return None, skipped
+
+    # 観察の撮影日時は先頭写真のものを使う（db.add_observation 側の規約）。
+    taken_at = saved[0][1]
     # 直近の観察履歴（日付＋種名）を判定へ渡す。この観察はまだ DB に無いので
     # 除外は不要。履歴が空（初観察）でも classify は従来どおり動く。
     history = db.recent_observations_for_context()
     try:
-        j = vision.classify(data, content_type, taken_at, history, observer_note)
+        j = vision.classify(images, taken_at, history, observer_note)
         db.add_observation(
-            filename, j.species, j.confidence, j.comment, "done", taken_at, observer_note
+            saved, j.species, j.confidence, j.comment, "done", observer_note
         )
-        return "done"
+        return "done", skipped
     except Exception:
         # 判定に失敗しても写真は残す。後から再判定でやり直せる。
-        db.add_observation(
-            filename, None, None, None, "failed", taken_at, observer_note
-        )
-        return "failed"
+        db.add_observation(saved, None, None, None, "failed", observer_note)
+        return "failed", skipped
 
 
 @app.on_event("startup")
@@ -234,12 +255,17 @@ async def create_observations(
     photos: list[UploadFile] = File(...),
     observer_note: str = Form(""),
 ):
-    # メモは任意。この取り込みバッチの全写真に同じメモを適用する。
+    # 1回の取り込み＝1つの観察。複数枚は「同じ被写体の複数アングル」として
+    # まとめて1回の判定に渡す。別の被写体は分けて取り込む（UI に明記）。
+    if len(photos) > _MAX_PHOTOS_PER_OBSERVATION:
+        return PlainTextResponse(
+            f"1つの観察に使える写真は {_MAX_PHOTOS_PER_OBSERVATION} 枚までです",
+            status_code=413,
+        )
     note = _clean_note(observer_note)
-    for photo in photos:
-        data = await photo.read()
-        # jpg/png 以外は _ingest_one が None を返す＝黙って無視（従来どおり）。
-        _ingest_one(data, photo.content_type, note)
+    files = [(await photo.read(), photo.content_type) for photo in photos]
+    # jpg/png 以外は _ingest_observation が対象外として落とす（従来どおり）。
+    _ingest_observation(files, note)
     return RedirectResponse(url="/observations", status_code=303)
 
 
@@ -249,12 +275,16 @@ def reclassify_observation(obs_id: int, observer_note: str = Form("")):
     note = _clean_note(observer_note)
     obs = db.get_observation(obs_id)
     if obs is not None:
-        media_type = "image/png" if obs.filename.endswith(".png") else "image/jpeg"
+        # その観察に紐づく全写真を渡し直す（取り込み時と同じ材料で判定させる）。
+        names = [p.filename for p in obs.photos] or [obs.filename]
         try:
-            data = (db.PHOTOS_DIR / obs.filename).read_bytes()
+            images = [
+                ((db.PHOTOS_DIR / name).read_bytes(), _media_type_of(name))
+                for name in names
+            ]
             # 再判定では自分自身を履歴から外す（自分を「再登場」と誤読させない）。
             history = db.recent_observations_for_context(exclude_id=obs_id)
-            j = vision.classify(data, media_type, obs.taken_at, history, note)
+            j = vision.classify(images, obs.taken_at, history, note)
             db.update_observation_result(
                 obs_id, j.species, j.confidence, j.comment, "done", note
             )
@@ -265,8 +295,7 @@ def reclassify_observation(obs_id: int, observer_note: str = Form("")):
 
 @app.post("/observations/{obs_id}/delete")
 def remove_observation(obs_id: int):
-    filename = db.delete_observation(obs_id)
-    if filename:
+    for filename in db.delete_observation(obs_id):
         (db.PHOTOS_DIR / filename).unlink(missing_ok=True)
     return RedirectResponse(url="/observations", status_code=303)
 
@@ -299,13 +328,15 @@ async def drop_submit(
     if not _token_ok(token):
         return PlainTextResponse("not found", status_code=404)
 
-    # メモは任意。この投函バッチの全写真に同じメモを適用する。
+    # 1回の投函＝1つの観察。複数枚は「同じ被写体の複数アングル」として扱う。
+    # メモも当然その1観察に付く。
     note = _clean_note(observer_note)
 
     # 上限チェック（読み込み前に。メモリ枯渇と乱用を防ぐ）。
-    if len(photos) > _UPLOAD_MAX_FILES:
+    if len(photos) > _MAX_PHOTOS_PER_OBSERVATION:
         return PlainTextResponse(
-            f"枚数が多すぎます（上限 {_UPLOAD_MAX_FILES} 枚）", status_code=413
+            f"枚数が多すぎます（1つの観察につき上限 {_MAX_PHOTOS_PER_OBSERVATION} 枚）",
+            status_code=413,
         )
     content_length = request.headers.get("content-length")
     if content_length is not None and content_length.isdigit():
@@ -315,7 +346,7 @@ async def drop_submit(
                 status_code=413,
             )
 
-    done = failed = skipped = 0
+    files: list[tuple[bytes, str | None]] = []
     total = 0
     for photo in photos:
         data = await photo.read()
@@ -326,19 +357,13 @@ async def drop_submit(
                 f"合計サイズが大きすぎます（上限 {_UPLOAD_MAX_TOTAL_BYTES // (1024 * 1024)} MiB）",
                 status_code=413,
             )
-        status = _ingest_one(data, photo.content_type, note)
-        if status == "done":
-            done += 1
-        elif status == "failed":
-            failed += 1
-        else:
-            # jpg/png 以外。投函口は一覧が無いので対象外も件数で知らせる。
-            skipped += 1
+        files.append((data, photo.content_type))
 
+    status, skipped = _ingest_observation(files, note)
+    # 投函口は一覧が無いので、対象外（jpg/png 以外）の枚数もここで知らせる。
     result = {
-        "accepted": done + failed,
-        "done": done,
-        "failed": failed,
+        "accepted": len(files) - skipped,
+        "status": status,
         "skipped": skipped,
     }
     return _drop_page(request, token, result=result)

@@ -19,6 +19,7 @@
     .nav a { color: inherit; }
     form.compose { margin-bottom: 2.2rem; }
     .compose input[type="file"] { font: inherit; }
+    .compose .hint { font-size: 0.75rem; opacity: 0.5; margin-top: 0.45rem; }
     .compose input[type="text"] {
       font: inherit;
       margin-top: 0.6rem;
@@ -46,14 +47,19 @@
       display: flex;
       gap: 0.9rem;
     }
+    /* 複数写真は縦に積む（1観察＝同じ被写体の複数アングル）。本文の幅は変えない。 */
+    .photos { display: flex; flex-direction: column; gap: 0.3rem; flex-shrink: 0; }
     .observation img {
       width: 96px;
       height: 96px;
       object-fit: cover;
       border-radius: 6px;
-      flex-shrink: 0;
+      display: block;
       background: rgba(128,128,128,0.12);
     }
+    /* 2枚目以降は小さく添えて、代表写真との主従を保つ。 */
+    .photos .sub { display: flex; gap: 0.3rem; flex-wrap: wrap; width: 96px; }
+    .photos .sub img { width: 30px; height: 30px; border-radius: 4px; }
     .detail { flex: 1; min-width: 0; }
     .meta { font-size: 0.8rem; opacity: 0.55; display: flex; justify-content: space-between; align-items: center; gap: 0.6rem; }
     .species { font-weight: 600; margin-top: 0.15rem; word-break: break-word; }
@@ -104,6 +110,10 @@
 
   <form class="compose" action="/observations" method="post" enctype="multipart/form-data">
     <div><input type="file" name="photos" accept="image/jpeg,image/png" multiple required></div>
+    <div class="hint">
+      複数枚は「同じ対象」の写真としてまとめて判定します。
+      別の対象は分けて投函してください（1回につき 8 枚まで）。
+    </div>
     <div><input type="text" name="observer_note"
                 placeholder="メモ（任意）: 大きさ、動き、心当たりの種など"></div>
     <div><button type="submit">取り込む</button></div>
@@ -113,9 +123,21 @@
   <ul class="observations">
     {% for obs in observations %}
     <li class="observation">
-      <a href="/photos/{{ obs.filename }}" target="_blank">
-        <img src="/photos/{{ obs.filename }}" alt="観察写真" loading="lazy">
-      </a>
+      {% set shots = obs.photos or [obs] %}
+      <div class="photos">
+        <a href="/photos/{{ shots[0].filename }}" target="_blank">
+          <img src="/photos/{{ shots[0].filename }}" alt="観察写真" loading="lazy">
+        </a>
+        {% if shots | length > 1 %}
+        <div class="sub">
+          {% for p in shots[1:] %}
+          <a href="/photos/{{ p.filename }}" target="_blank">
+            <img src="/photos/{{ p.filename }}" alt="観察写真（別アングル）" loading="lazy">
+          </a>
+          {% endfor %}
+        </div>
+        {% endif %}
+      </div>
       <div class="detail">
         <div class="meta">
           <span>{{ obs.taken_at | local }}</span>

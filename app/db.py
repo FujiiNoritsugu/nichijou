@@ -31,9 +31,16 @@ class Entry:
 
 
 @dataclass(frozen=True)
+class Photo:
+    """観察に属する写真1枚。同じ被写体を複数アングルで撮った束の一員。"""
+    filename: str      # PHOTOS_DIR 配下の保存ファイル名（相対）。
+    taken_at: datetime  # 撮影日時（EXIF）。写真ごとに持つ。tz-aware（UTC）。
+
+
+@dataclass(frozen=True)
 class Observation:
     id: int
-    filename: str            # PHOTOS_DIR 配下の保存ファイル名（相対）。
+    filename: str            # 代表写真のファイル名。photos[0] と同じ（後方互換用）。
     species: str | None      # 判定種名／分かる分類階級。判定失敗時は None。
     confidence: str | None   # 高／中／低。判定失敗時は None。
     comment: str | None      # 一言コメント。判定失敗時は None。
@@ -41,6 +48,7 @@ class Observation:
     taken_at: datetime       # 撮影日時（EXIF）。無ければ登録日時で代用。tz-aware（UTC）。
     created_at: datetime     # 登録日時。tz-aware（UTC）。
     observer_note: str | None = None  # 観察者が現場で添える任意メモ。無ければ None。
+    photos: tuple[Photo, ...] = ()    # この観察の全写真（ordinal 昇順）。
 
 
 def _connect() -> sqlite3.Connection:
@@ -82,6 +90,38 @@ def init_db() -> None:
         cols = {r["name"] for r in conn.execute("PRAGMA table_info(observations)")}
         if "observer_note" not in cols:
             conn.execute("ALTER TABLE observations ADD COLUMN observer_note TEXT")
+
+        # 観察写真テーブル。observations と 1 対多（1観察＝同じ被写体の複数アングル）。
+        # observations.filename は代表写真として当面残すが、正はこちら。
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS observation_photos (
+                id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                observation_id INTEGER NOT NULL REFERENCES observations(id),
+                photo_path     TEXT NOT NULL,
+                taken_at       TEXT NOT NULL,
+                ordinal        INTEGER NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_observation_photos_obs "
+            "ON observation_photos (observation_id, ordinal)"
+        )
+        # 1対多化のマイグレーション。既存の各観察（写真1枚）を1行ずつ流し込む。
+        # べき等性は「observation_photos が空のときだけ実行する」で担保する
+        # （移行後は必ず1行以上あるので、再起動で二重登録されない）。
+        empty = conn.execute(
+            "SELECT NOT EXISTS (SELECT 1 FROM observation_photos)"
+        ).fetchone()[0]
+        if empty:
+            conn.execute(
+                """
+                INSERT INTO observation_photos
+                    (observation_id, photo_path, taken_at, ordinal)
+                SELECT id, filename, taken_at, 0 FROM observations
+                """
+            )
 
 
 def add_entry(body: str) -> None:
@@ -143,7 +183,9 @@ def delete_entry(entry_id: int) -> None:
 
 # --- 観察（写真＋AI判定） -------------------------------------------------
 
-def _row_to_observation(row: sqlite3.Row) -> Observation:
+def _row_to_observation(
+    row: sqlite3.Row, photos: tuple[Photo, ...] = ()
+) -> Observation:
     return Observation(
         id=row["id"],
         filename=row["filename"],
@@ -154,43 +196,77 @@ def _row_to_observation(row: sqlite3.Row) -> Observation:
         taken_at=datetime.fromisoformat(row["taken_at"]),
         created_at=datetime.fromisoformat(row["created_at"]),
         observer_note=row["observer_note"],
+        photos=photos,
     )
 
 
+def _photos_for(conn: sqlite3.Connection, obs_ids: list[int]) -> dict[int, list[Photo]]:
+    """観察 id の集合について、写真を ordinal 昇順でまとめて引く（N+1 を避ける）。"""
+    if not obs_ids:
+        return {}
+    marks = ",".join("?" * len(obs_ids))
+    rows = conn.execute(
+        f"SELECT observation_id, photo_path, taken_at FROM observation_photos "
+        f"WHERE observation_id IN ({marks}) ORDER BY observation_id, ordinal, id",
+        tuple(obs_ids),
+    ).fetchall()
+    out: dict[int, list[Photo]] = {}
+    for r in rows:
+        out.setdefault(r["observation_id"], []).append(
+            Photo(filename=r["photo_path"], taken_at=datetime.fromisoformat(r["taken_at"]))
+        )
+    return out
+
+
 def add_observation(
-    filename: str,
+    photos: list[tuple[str, datetime | None]],
     species: str | None,
     confidence: str | None,
     comment: str | None,
     status: str,
-    taken_at: datetime | None,
     observer_note: str | None = None,
-) -> None:
-    """観察を1件保存する。created_at はサーバ側で UTC を打つ。
-    taken_at（撮影日時）が無ければ登録日時で代用する。
-    observer_note は観察者が現場で添える任意メモ（空なら None）。"""
+) -> int:
+    """観察を1件保存する。photos は (ファイル名, 撮影日時) の並び（表示順）で、
+    すべて同じ被写体を写したものとして1つの観察にまとまる。created_at はサーバ側で
+    UTC を打つ。観察の taken_at は先頭写真の撮影日時（無ければ登録日時）を採る。
+    observer_note は観察者が現場で添える任意メモ（空なら None）。新しい id を返す。"""
+    if not photos:
+        raise ValueError("観察には写真が最低1枚必要")
     created = datetime.now(timezone.utc)
-    taken = taken_at or created
+    taken = photos[0][1] or created
     with _connect() as conn:
-        conn.execute(
+        cur = conn.execute(
             """
             INSERT INTO observations
                 (filename, species, confidence, comment, status, taken_at, created_at,
                  observer_note)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (filename, species, confidence, comment, status,
+            (photos[0][0], species, confidence, comment, status,
              taken.isoformat(), created.isoformat(), observer_note),
         )
+        obs_id = cur.lastrowid
+        conn.executemany(
+            "INSERT INTO observation_photos "
+            "(observation_id, photo_path, taken_at, ordinal) VALUES (?, ?, ?, ?)",
+            [
+                (obs_id, name, (shot or created).isoformat(), i)
+                for i, (name, shot) in enumerate(photos)
+            ],
+        )
+    return obs_id
 
 
 def list_observations() -> list[Observation]:
-    """全件を新しい順（撮影日時 降順、同時刻は id 降順）で返す。"""
+    """全件を新しい順（撮影日時 降順、同時刻は id 降順）で、写真つきで返す。"""
     with _connect() as conn:
         rows = conn.execute(
             "SELECT * FROM observations ORDER BY taken_at DESC, id DESC"
         ).fetchall()
-    return [_row_to_observation(row) for row in rows]
+        photos = _photos_for(conn, [r["id"] for r in rows])
+    return [
+        _row_to_observation(row, tuple(photos.get(row["id"], []))) for row in rows
+    ]
 
 
 def recent_observations_for_context(
@@ -221,12 +297,15 @@ def recent_observations_for_context(
 
 
 def get_observation(obs_id: int) -> Observation | None:
-    """1件取得する（再判定で写真ファイル名が必要になる）。"""
+    """1件取得する（再判定でこの観察の全写真が必要になる）。"""
     with _connect() as conn:
         row = conn.execute(
             "SELECT * FROM observations WHERE id = ?", (obs_id,)
         ).fetchone()
-    return _row_to_observation(row) if row else None
+        if row is None:
+            return None
+        photos = _photos_for(conn, [obs_id])
+    return _row_to_observation(row, tuple(photos.get(obs_id, [])))
 
 
 def update_observation_result(
@@ -247,12 +326,25 @@ def update_observation_result(
         )
 
 
-def delete_observation(obs_id: int) -> str | None:
+def delete_observation(obs_id: int) -> list[str]:
     """1件削除する。写真ファイルの実体削除は呼び出し側で行うため、削除した
-    ファイル名を返す（行が無ければ None）。"""
+    ファイル名を全て返す（行が無ければ空リスト）。"""
     with _connect() as conn:
         row = conn.execute(
             "SELECT filename FROM observations WHERE id = ?", (obs_id,)
         ).fetchone()
+        if row is None:
+            return []
+        names = [
+            r["photo_path"]
+            for r in conn.execute(
+                "SELECT photo_path FROM observation_photos WHERE observation_id = ?",
+                (obs_id,),
+            )
+        ]
+        conn.execute("DELETE FROM observation_photos WHERE observation_id = ?", (obs_id,))
         conn.execute("DELETE FROM observations WHERE id = ?", (obs_id,))
-    return row["filename"] if row else None
+    # 代表写真は observation_photos にも入っているのが正だが、念のため取りこぼさない。
+    if row["filename"] not in names:
+        names.append(row["filename"])
+    return names

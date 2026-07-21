@@ -40,7 +40,7 @@
       box-sizing: border-box;
     }
     .note-field { display: flex; flex-direction: column; gap: 0.35rem; }
-    .note-field .hint { font-size: 0.75rem; opacity: 0.5; }
+    .hint { font-size: 0.75rem; opacity: 0.5; margin: -0.5rem 0 0; }
     button {
       font: inherit;
       font-size: 1.05rem;
@@ -69,21 +69,30 @@
   <p class="lead">散歩で撮った写真を、ここから日乗の観察へ投函します。</p>
 
   {% if result %}
-  <div class="result{% if result.failed or result.skipped %} warn{% endif %}">
-    <div class="head">{{ result.accepted }} 枚受け付けました</div>
+  <div class="result{% if result.status != 'done' or result.skipped %} warn{% endif %}">
+    <div class="head">
+      {%- if result.status %}{{ result.accepted }} 枚を1つの観察として受け付けました
+      {%- else %}取り込める写真がありませんでした{% endif -%}
+    </div>
     <div class="detail">
-      判定 完了 {{ result.done }} 件 ／ 失敗 {{ result.failed }} 件
-      {%- if result.skipped %} ／ 対象外（jpg・png 以外）{{ result.skipped }} 件{% endif %}
+      {%- if result.status == 'done' %}判定 完了
+      {%- elif result.status == 'failed' %}判定 失敗（あとで再判定できます）
+      {%- endif -%}
+      {%- if result.skipped %} ／ 対象外（jpg・png 以外）{{ result.skipped }} 枚{% endif %}
     </div>
   </div>
   {% endif %}
 
   <form class="drop" action="/u/{{ token }}" method="post" enctype="multipart/form-data">
     <input type="file" name="photos" accept="image/*" multiple required>
+    <p class="hint">
+      複数枚は「同じ対象」の写真としてまとめて判定します。
+      別の対象は分けて投函してください（1回につき 8 枚まで）。
+    </p>
     <div class="note-field">
       <input type="text" name="observer_note"
              placeholder="メモ（任意）: 大きさ、動き、心当たりの種など">
-      <span class="hint">メモは今回の写真すべてに適用されます</span>
+      <span class="hint">メモは今回の観察に付きます</span>
     </div>
     <button type="submit">投函する</button>
   </form>
